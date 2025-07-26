@@ -1,5 +1,3 @@
-<a href="https://zerodha.tech"><img src="https://zerodha.tech/static/images/github-badge.svg" align="right" /></a>
-
 ## Frappe S3 Attachment
 
 Frappe app to make file upload automatically upload and read from s3 and download from S3.
@@ -19,8 +17,13 @@ Frappe app to make file upload automatically upload and read from s3 and downloa
 
 #### Installation.
 
-1. bench get-app --branch v13 [https://github.com/Improwised/Frappe-attachments-s3.git](https://github.com/Improwised/frappe_s3_attachment)
+1. bench get-app --branch v13 [git@github.com:TimesTechs/frappe_s3_attachment.git](https://github.com/TimesTechs/frappe_s3_attachment)
 2. bench --site {site} install-app frappe_s3_attachment
+3. sudo apt install libmagic1
+4. pip install python-magic
+5. pip install python-magic
+#### change dir to to app dir 'frappe_s3_attachment'
+6. pip install -r requirements.txt --upgrate
 
 #### Configuration Setup.
 
@@ -39,15 +42,15 @@ Frappe app to make file upload automatically upload and read from s3 and downloa
    Updated path for private files - private/files/{fileName.Extension}<br/>
    Updated path for public files - files/{fileName.Extension}
 
-### Safely removing a Zerodha app and install Improwised frappe s3 attachment.
+### Safely removing a Times Tx app and install Improwised frappe s3 attachment.
 
-1. This will remove Zerodha app from site
+1. This will remove Times Tx app from site
 ```
 $ bench --site {site} uninstall-app frappe_s3_attachment 
 ```
 2. Get App of Improwised. If, any overwritten permission needed, provide yes
 ```
-$ bench get-app --branch v13 https://github.com/Improwised/frappe_s3_attachment.git 
+$ bench get-app  git@github.com:TimesTechs/frappe_s3_attachment.git 
 ```
 3. This will install Improwised Frappe S3 attachment in site
 ```
