@@ -17,11 +17,10 @@ Frappe app to make file upload automatically upload and read from s3 and downloa
 
 #### Installation.
 
-1. bench get-app --branch v13 [git@github.com:TimesTechs/frappe_s3_attachment.git](https://github.com/TimesTechs/frappe_s3_attachment)
+1. bench get-app [git@github.com:TimesTechs/frappe_s3_attachment.git](https://github.com/TimesTechs/frappe_s3_attachment)
 2. bench --site {site} install-app frappe_s3_attachment
 3. sudo apt install libmagic1
 4. pip install python-magic
-5. pip install python-magic
 #### change dir to to app dir 'frappe_s3_attachment'
 6. pip install -r requirements.txt --upgrate
 
