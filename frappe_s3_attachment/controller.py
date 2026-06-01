@@ -10,7 +10,7 @@ import time
 
 import boto3
 
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
@@ -18,6 +18,12 @@ import frappe
 import magic
 
 #custom added code for download file is represented as dow{number}
+
+
+def _inline_content_disposition(file_name):
+    """Content-Disposition so browsers open in tab instead of forcing download."""
+    safe_name = (file_name or "file").replace('"', "")
+    return f'inline; filename="{safe_name}"'
 
 class S3Operations(object):
 
@@ -67,6 +73,17 @@ class S3Operations(object):
         self.BUCKET = self.s3_settings_doc.bucket_name
         # Ensure folder_name is a string, not None
         self.folder_name = self.s3_settings_doc.folder_name or ""
+
+    def use_signed_url(self):
+        return bool(self.s3_settings_doc.get("use_signed_url"))
+
+    def get_public_url(self, key):
+        """Permanent unsigned URL for a public S3 object."""
+        custom_base = (self.s3_settings_doc.get("public_url_base") or "").strip()
+        if custom_base:
+            return f"{custom_base.rstrip('/')}/{key}"
+        region = (self.s3_settings_doc.region_name or "us-east-1").strip()
+        return f"https://{self.BUCKET}.s3.{region}.amazonaws.com/{quote(key, safe='/')}"
 
     def strip_special_chars(self, file_name):
         """
@@ -133,29 +150,21 @@ class S3Operations(object):
         mime_type = magic.from_file(file_path, mime=True)
         key = self.key_generator(file_name, parent_doctype, parent_name)
         content_type = mime_type
+        extra_args = {
+            "ContentType": content_type,
+            "ContentDisposition": _inline_content_disposition(file_name),
+            "Metadata": {
+                "ContentType": content_type,
+                "file_name": file_name,
+            },
+        }
+        if not is_private and not self.use_signed_url():
+            extra_args["ACL"] = "public-read"
         try:
-            if is_private:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
-                        "ContentType": content_type,
-                        "Metadata": {
-                            "ContentType": content_type,
-                            "file_name": file_name
-                        }
-                    }
-                )
-            else:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
-                        "ContentType": content_type,
-                        "Metadata": {
-                            "ContentType": content_type,
-                            "file_name": file_name
-                        }
-                    }
-                )
+            self.S3_CLIENT.upload_file(
+                file_path, self.BUCKET, key,
+                ExtraArgs=extra_args,
+            )
 
         except boto3.exceptions.S3UploadFailedError:
             frappe.throw(frappe._("File Upload Failed. Please try again."))
@@ -191,6 +200,21 @@ class S3Operations(object):
         """
         return self.S3_CLIENT.get_object(Bucket=self.BUCKET, Key=key)
 
+    def set_object_inline_disposition(self, key, file_name):
+        """Update S3 object metadata so browsers display inline instead of downloading."""
+        head = self.S3_CLIENT.head_object(Bucket=self.BUCKET, Key=key)
+        copy_kwargs = {
+            "Bucket": self.BUCKET,
+            "Key": key,
+            "CopySource": {"Bucket": self.BUCKET, "Key": key},
+            "ContentType": head.get("ContentType") or "application/octet-stream",
+            "ContentDisposition": _inline_content_disposition(file_name),
+            "MetadataDirective": "REPLACE",
+        }
+        if not self.use_signed_url():
+            copy_kwargs["ACL"] = "public-read"
+        self.S3_CLIENT.copy_object(**copy_kwargs)
+
     def get_url(self, key, file_name=None):
         """
         Return url.
@@ -208,7 +232,7 @@ class S3Operations(object):
 
         }
         if file_name:
-            params['ResponseContentDisposition'] = 'filename={}'.format(file_name)
+            params["ResponseContentDisposition"] = _inline_content_disposition(file_name)
 
         url = self.S3_CLIENT.generate_presigned_url(
             'get_object',
@@ -245,9 +269,13 @@ def file_upload_to_s3(doc, method):
             parent_name
         )
 
-        # Use signed URLs for all files (both private and public)
         method = "frappe_s3_attachment.controller.generate_file"
-        file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
+        if doc.is_private or s3_upload.use_signed_url():
+            file_url = "/api/method/{0}?key={1}&file_name={2}".format(
+                method, key, doc.file_name
+            )
+        else:
+            file_url = s3_upload.get_public_url(key)
         os.remove(file_path)
         frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
@@ -264,16 +292,45 @@ def file_upload_to_s3(doc, method):
 @frappe.whitelist()
 def generate_file(key=None, file_name=None):
     """
-    Function to stream file from s3.
+    Stream or redirect to S3 file. Uses signed redirect only when enabled in settings.
     """
-    if key:
-        s3_upload = S3Operations()
-        signed_url = s3_upload.get_url(key, file_name)
+    if not key:
+        frappe.local.response["body"] = "Key not found."
+        return
+
+    s3_upload = S3Operations()
+
+    if not s3_upload.use_signed_url():
+        file_doc = frappe.db.get_value(
+            "File",
+            {"content_hash": key},
+            ["file_name", "is_private"],
+            as_dict=True,
+        )
+        if file_doc and file_doc.is_private:
+            _stream_file_from_s3(
+                s3_upload, key, file_name or file_doc.file_name
+            )
+            return
         frappe.local.response["type"] = "redirect"
-        frappe.local.response["location"] = signed_url
-    else:
-        frappe.local.response['body'] = "Key not found."
-    return
+        frappe.local.response["location"] = s3_upload.get_public_url(key)
+        return
+
+    signed_url = s3_upload.get_url(key, file_name)
+    frappe.local.response["type"] = "redirect"
+    frappe.local.response["location"] = signed_url
+
+
+def _stream_file_from_s3(s3_upload, key, file_name=None):
+    """Serve file through Frappe (no expiring signed URL)."""
+    obj = s3_upload.read_file_from_s3(key)
+    body = obj["Body"].read()
+    display_name = file_name or key.split("/")[-1]
+    frappe.local.response.filename = display_name
+    frappe.local.response.filecontent = body
+    frappe.local.response.type = "download"
+    frappe.local.response.display_content_as = "inline"
+    frappe.local.response["content_type"] = obj.get("ContentType") or "application/octet-stream"
 
 
 
@@ -312,15 +369,11 @@ def upload_existing_files_s3(name, file_name):
             parent_name
         )
 
-        if doc.is_private:
-            method = "frappe_s3_attachment.controller.generate_file"
-            file_url = """/api/method/{0}?key={1}""".format(method, key)
+        method = "frappe_s3_attachment.controller.generate_file"
+        if doc.is_private or s3_upload.use_signed_url():
+            file_url = "/api/method/{0}?key={1}".format(method, key)
         else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+            file_url = s3_upload.get_public_url(key)
         
         # Remove local file only after successful upload
         os.remove(file_path)
@@ -431,12 +484,73 @@ def get_content_hash(content):
 
 def s3_file_regex_match(file_url):
     """
-    Match the public file regex match.
+    Match S3-backed file URLs (API method or direct S3 HTTPS URL).
     """
     return re.match(
-        r'^(https:|/api/method/frappe_s3_attachment.controller.generate_file)',
-        file_url
+        r'^(https:|/api/method/frappe_s3_attachment\.controller\.generate_file)',
+        file_url or "",
     )
+
+
+@frappe.whitelist()
+def migrate_file_urls_to_public():
+    """
+    Replace /api/method/... file_url with permanent public S3 URLs for non-private files,
+    and set S3 Content-Disposition to inline so files open in the browser tab.
+    """
+    s3_upload = S3Operations()
+    if s3_upload.use_signed_url():
+        frappe.throw(
+            frappe._("Uncheck 'Use Signed URL (expires)' in S3 File Attachment settings first.")
+        )
+
+    files = frappe.db.sql(
+        """
+        SELECT name, content_hash, is_private, file_name, file_url
+        FROM `tabFile`
+        WHERE content_hash IS NOT NULL AND content_hash != ''
+        AND (
+            file_url LIKE '/api/method/frappe_s3_attachment%%'
+            OR file_url LIKE '%%.amazonaws.com/%%'
+        )
+        """,
+        as_dict=True,
+    )
+    updated = 0
+    inline_fixed = 0
+    skipped_private = 0
+    skipped_no_key = 0
+
+    for file_row in files:
+        if file_row.is_private:
+            skipped_private += 1
+            continue
+        key = (file_row.content_hash or "").strip()
+        if not key or key.startswith(("http://", "https://", "/")):
+            skipped_no_key += 1
+            continue
+        try:
+            s3_upload.set_object_inline_disposition(key, file_row.file_name)
+            inline_fixed += 1
+        except ClientError:
+            try:
+                s3_upload.S3_CLIENT.put_object_acl(
+                    Bucket=s3_upload.BUCKET, Key=key, ACL="public-read"
+                )
+            except ClientError:
+                pass
+        if file_row.file_url.startswith("/api/method/frappe_s3_attachment"):
+            public_url = s3_upload.get_public_url(key)
+            frappe.db.set_value(
+                "File", file_row.name, "file_url", public_url, update_modified=False
+            )
+            updated += 1
+
+    frappe.db.commit()
+    return frappe._(
+        "Updated {0} file URL(s), fixed inline view on {1} S3 object(s). "
+        "Skipped {2} private, {3} without S3 key."
+    ).format(updated, inline_fixed, skipped_private, skipped_no_key)
 
 @frappe.whitelist()
 def migrate_existing_files():

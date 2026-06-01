@@ -14,8 +14,11 @@
   "section_break_7",
   "region_name",
   "folder_name",
+  "use_signed_url",
+  "public_url_base",
   "signed_url_expiry_time",
   "section_break_10",
+  "migrate_to_public_urls",
   "migrate_existing_files",
   "migrate_s3_files_to_local"
  ],
@@ -66,7 +69,21 @@
    "label": "Folder Name"
   },
   {
+   "default": "0",
+   "description": "When unchecked, public files get a permanent direct S3 URL (no expiry). Private files are streamed through Frappe without redirecting to a signed URL.",
+   "fieldname": "use_signed_url",
+   "fieldtype": "Check",
+   "label": "Use Signed URL (expires)"
+  },
+  {
+   "description": "Optional. e.g. https://your-bucket.s3.eu-central-1.amazonaws.com — leave empty to auto-build from bucket and region.",
+   "fieldname": "public_url_base",
+   "fieldtype": "Data",
+   "label": "Public URL Base"
+  },
+  {
    "default": "300",
+   "depends_on": "eval:doc.use_signed_url",
    "description": "time should be in seconds",
    "fieldname": "signed_url_expiry_time",
    "fieldtype": "Int",
@@ -85,6 +102,11 @@
    "fieldname": "migrate_s3_files_to_local",
    "fieldtype": "Button",
    "label": "Migrate S3 to local"
+  },
+  {
+   "fieldname": "migrate_to_public_urls",
+   "fieldtype": "Button",
+   "label": "Update File URLs to Public S3 URLs"
   }
  ],
  "issingle": 1,
