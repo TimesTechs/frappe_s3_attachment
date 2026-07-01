@@ -255,8 +255,10 @@ def file_upload_to_s3(doc, method):
         
         doc.file_url = file_url
         
-        if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
-            frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
+        parent_meta = frappe.get_meta(parent_doctype) if parent_doctype else None
+        image_field = parent_meta.get("image_field") if parent_meta else None
+        if image_field and doc.attached_to_field == image_field:
+            frappe.db.set_value(parent_doctype, parent_name, image_field, file_url)
 
         frappe.db.commit()
         doc.reload()
