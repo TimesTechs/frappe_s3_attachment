@@ -243,6 +243,15 @@ class S3Operations(object):
         return url
 
 
+def _ignore_s3_upload_for_doctype(parent_doctype):
+    """Doctypes whose files should stay on local disk (Frappe default behaviour)."""
+    ignore_doctypes = frappe.local.conf.get('ignore_s3_upload_for_doctype') or [
+        'Website Settings',
+        'Navbar Settings',
+    ]
+    return parent_doctype in ignore_doctypes
+
+
 @frappe.whitelist()
 def file_upload_to_s3(doc, method):
     """
@@ -257,8 +266,7 @@ def file_upload_to_s3(doc, method):
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
     parent_name = doc.attached_to_name
-    ignore_s3_upload_for_doctype = frappe.local.conf.get('ignore_s3_upload_for_doctype') or ['Data Import']
-    if parent_doctype not in ignore_s3_upload_for_doctype:
+    if not _ignore_s3_upload_for_doctype(parent_doctype):
         if not doc.is_private:
             file_path = site_path + '/public' + path
         else:
@@ -352,6 +360,9 @@ def upload_existing_files_s3(name, file_name):
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
     parent_name = doc.attached_to_name or name
+
+    if _ignore_s3_upload_for_doctype(parent_doctype):
+        return
     
     if not doc.is_private:
         file_path = site_path + '/public' + path
