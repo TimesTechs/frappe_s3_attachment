@@ -30,11 +30,6 @@ class S3Operations(object):
             'S3 File Attachment',
             'S3 File Attachment',
         )
-        
-        # Validate required settings
-        if not self.s3_settings_doc.bucket_name:
-            frappe.throw(frappe._("S3 bucket name is required. Please configure S3 File Attachment settings."))
-        
         if (
             self.s3_settings_doc.aws_key and
             self.s3_settings_doc.aws_secret
@@ -65,8 +60,7 @@ class S3Operations(object):
             )
 
         self.BUCKET = self.s3_settings_doc.bucket_name
-        # Ensure folder_name is a string, not None
-        self.folder_name = self.s3_settings_doc.folder_name or ""
+        self.folder_name = self.s3_settings_doc.folder_name
 
     def strip_special_chars(self, file_name):
         """
@@ -108,11 +102,8 @@ class S3Operations(object):
         doc_path = None
 
         if not doc_path:
-            # Ensure folder_name is not None and is a string
-            folder_name = self.folder_name or ""
-            
-            if folder_name:
-                final_key = folder_name + "/" + year + "/" + month + \
+            if self.folder_name:
+                final_key = self.folder_name + "/" + year + "/" + month + \
                     "/" + day + "/" + parent_doctype + "/" + key + "_" + \
                     file_name
             else:
@@ -122,6 +113,19 @@ class S3Operations(object):
         else:
             final_key = doc_path + '/' + key + "_" + file_name
             return final_key
+
+    def ascii_safe_meta(self, value):
+        """S3 object metadata values must be ASCII (boto3 raises
+        ParamValidationError otherwise). Percent-encode non-ASCII filenames
+        (umlauts, en-dashes, apostrophes ...) so the upload never fails;
+        encoding is reversible with urllib.parse.unquote."""
+        value = str(value or '')
+        try:
+            value.encode('ascii')
+            return value
+        except UnicodeEncodeError:
+            from urllib.parse import quote
+            return quote(value)
 
     def upload_files_to_s3_with_key(
             self, file_path, file_name, is_private, parent_doctype, parent_name
@@ -141,7 +145,7 @@ class S3Operations(object):
                         "ContentType": content_type,
                         "Metadata": {
                             "ContentType": content_type,
-                            "file_name": file_name
+                            "file_name": self.ascii_safe_meta(file_name)
                         }
                     }
                 )
@@ -152,7 +156,7 @@ class S3Operations(object):
                         "ContentType": content_type,
                         "Metadata": {
                             "ContentType": content_type,
-                            "file_name": file_name
+                            "file_name": self.ascii_safe_meta(file_name)
                         }
                     }
                 )
@@ -255,10 +259,8 @@ def file_upload_to_s3(doc, method):
         
         doc.file_url = file_url
         
-        parent_meta = frappe.get_meta(parent_doctype) if parent_doctype else None
-        image_field = parent_meta.get("image_field") if parent_meta else None
-        if image_field and doc.attached_to_field == image_field:
-            frappe.db.set_value(parent_doctype, parent_name, image_field, file_url)
+        if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
+            frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
 
         frappe.db.commit()
         doc.reload()
@@ -284,30 +286,17 @@ def upload_existing_files_s3(name, file_name):
     Function to upload all existing files.
     """
     file_doc_name = frappe.db.get_value('File', {'name': name})
-    if not file_doc_name:
-        frappe.throw(f"File with name '{name}' not found")
-    
-    doc = frappe.get_doc('File', name)
-    s3_upload = S3Operations()
-    path = doc.file_url
-    
-    if not path:
-        frappe.throw(f"File '{name}' has no file_url")
-    
-    site_path = frappe.utils.get_site_path()
-    parent_doctype = doc.attached_to_doctype or 'File'
-    parent_name = doc.attached_to_name or name
-    
-    if not doc.is_private:
-        file_path = site_path + '/public' + path
-    else:
-        file_path = site_path + path
-    
-    # Check if file exists on disk
-    if not os.path.exists(file_path):
-        frappe.throw(f"File not found on disk: {file_path}")
-    
-    try:
+    if file_doc_name:
+        doc = frappe.get_doc('File', name)
+        s3_upload = S3Operations()
+        path = doc.file_url
+        site_path = frappe.utils.get_site_path()
+        parent_doctype = doc.attached_to_doctype
+        parent_name = doc.attached_to_name
+        if not doc.is_private:
+            file_path = site_path + '/public' + path
+        else:
+            file_path = site_path + path
         key = s3_upload.upload_files_to_s3_with_key(
             file_path, doc.file_name,
             doc.is_private, parent_doctype,
@@ -323,17 +312,13 @@ def upload_existing_files_s3(name, file_name):
                 s3_upload.BUCKET,
                 key
             )
-        
-        # Remove local file only after successful upload
         os.remove(file_path)
-        
-        frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
+        doc = frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
             file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
         frappe.db.commit()
-        
-    except Exception as e:
-        frappe.throw(f"Failed to upload file '{name}' to S3: {str(e)}")
+    else:
+        pass
 
 
 # download s3 file
@@ -450,27 +435,10 @@ def migrate_existing_files():
         'File',
         fields=['name', 'file_url', 'file_name']
     )
-    
-    success_count = 0
-    error_count = 0
-    
     for file in files_list:
         if file['file_url']:
             if not s3_file_regex_match(file['file_url']):
-                try:
-                    upload_existing_files_s3(file['name'], file['file_name'])
-                    success_count += 1
-                except Exception as e:
-                    error_count += 1
-                    frappe.log_error(
-                        f"Failed to migrate file {file['name']}: {str(e)}", 
-                        "S3 Migration Error"
-                    )
-    
-    frappe.msgprint(
-        f"Migration completed. Success: {success_count}, Errors: {error_count}",
-        title="Migration Status"
-    )
+                upload_existing_files_s3(file['name'], file['file_name'])
     return True
 
 @frappe.whitelist()
@@ -511,41 +479,3 @@ def ping():
     Test function to check if api function work.
     """
     return "pong"
-
-
-@frappe.whitelist()
-def validate_s3_settings():
-    """
-    Validate S3 settings and return status.
-    """
-    try:
-        s3_upload = S3Operations()
-        
-        # Test S3 connection by listing buckets
-        response = s3_upload.S3_CLIENT.list_buckets()
-        
-        # Check if configured bucket exists
-        bucket_exists = False
-        for bucket in response['Buckets']:
-            if bucket['Name'] == s3_upload.BUCKET:
-                bucket_exists = True
-                break
-        
-        if not bucket_exists:
-            return {
-                "status": "error",
-                "message": f"Bucket '{s3_upload.BUCKET}' not found in S3 account"
-            }
-        
-        return {
-            "status": "success",
-            "message": "S3 settings are valid and bucket is accessible",
-            "bucket": s3_upload.BUCKET,
-            "folder": s3_upload.folder_name or "No folder configured"
-        }
-        
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"S3 settings validation failed: {str(e)}"
-        }
