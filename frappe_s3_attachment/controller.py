@@ -243,11 +243,23 @@ class S3Operations(object):
         return url
 
 
+# Files for these doctypes must never move to S3 (importer needs a local path).
+_ALWAYS_LOCAL_DOCTYPES = frozenset({"Data Import"})
+
+
 def _ignore_s3_upload_for_doctype(parent_doctype):
-    """Doctypes whose files should stay on local disk (Frappe default behaviour)."""
-    ignore_doctypes = frappe.local.conf.get('ignore_s3_upload_for_doctype') or [
-        'Website Settings',
-        'Navbar Settings',
+    """Doctypes whose files should stay on local disk (Frappe default behaviour).
+
+    Data Import must remain local — the importer reads CSV/XLSX from the
+    filesystem and cannot open S3 ``generate_file`` URLs.
+    """
+    if parent_doctype in _ALWAYS_LOCAL_DOCTYPES:
+        return True
+
+    ignore_doctypes = frappe.local.conf.get("ignore_s3_upload_for_doctype") or [
+        "Website Settings",
+        "Navbar Settings",
+        "Data Import",
     ]
     return parent_doctype in ignore_doctypes
 
