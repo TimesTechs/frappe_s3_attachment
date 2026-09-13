@@ -17,7 +17,31 @@ from botocore.exceptions import ClientError
 import frappe
 import magic
 
+from frappe_s3_attachment.pdf_compress import MIN_BYTES
+
 #custom added code for download file is represented as dow{number}
+
+def compress_key_async(key):
+    """Background job: re-compress one already-uploaded object in place.
+
+    Ghostscript takes seconds on a 30 MB scan and the user should not wait for
+    it, so the original is uploaded first and this runs afterwards. Reuses the
+    Phase 2 backlog logic verbatim — same key, same extension, same
+    ``compressed=1`` marker — so uploads and the bulk run cannot drift apart.
+
+    Consequence: for a few seconds after an upload the object in the bucket is
+    the original, and ``tabFile.file_size`` never matches the compressed
+    object at all. That column is display-only here.
+    """
+    # Imported lazily: compress_backlog mutates sys.path at import time.
+    from frappe_s3_attachment.compress_backlog import process_one
+
+    s3 = S3Operations()
+    status, saved, _read = process_one(
+        s3.S3_CLIENT, s3.BUCKET, key, dry_run=False, min_bytes=MIN_BYTES
+    )
+    return {'status': status, 'saved': saved}
+
 
 class S3Operations(object):
 
@@ -163,6 +187,19 @@ class S3Operations(object):
 
         except boto3.exceptions.S3UploadFailedError:
             frappe.throw(frappe._("File Upload Failed. Please try again."))
+
+        # Gate on the same floor the compressor uses, so a .txt or a small PDF
+        # never queues a job that would immediately return "too_small".
+        if mime_type == 'application/pdf' and os.path.getsize(file_path) >= MIN_BYTES:
+            try:
+                frappe.enqueue(
+                    'frappe_s3_attachment.controller.compress_key_async',
+                    queue='long', timeout=600, key=key,
+                )
+            except Exception:
+                # The file is already safely in the bucket; a Redis hiccup must
+                # not fail an upload that succeeded. The backlog run catches it.
+                frappe.log_error(frappe.get_traceback(), 'PDF compression not queued')
         return key
 
     def delete_from_s3(self, key):
