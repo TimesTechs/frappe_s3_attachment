@@ -19,6 +19,24 @@ import magic
 
 from frappe_s3_attachment.pdf_compress import MIN_BYTES
 
+# DigitalOcean Spaces regions are not AWS regions. boto3 otherwise builds
+# https://<bucket>.s3.<region>.amazonaws.com, which does not exist for these codes.
+DO_SPACES_REGIONS = {"nyc3", "ams3", "sfo3", "sgp1", "fra1", "blr1", "syd1", "atl1", "tor1"}
+
+
+def _s3_connection_kwargs(settings):
+    kwargs = {
+        "region_name": settings.region_name,
+        "config": Config(signature_version="s3v4"),
+    }
+    if settings.aws_key and settings.aws_secret:
+        kwargs["aws_access_key_id"] = settings.aws_key
+        kwargs["aws_secret_access_key"] = settings.aws_secret
+    region = (settings.region_name or "").strip().lower()
+    if region in DO_SPACES_REGIONS:
+        kwargs["endpoint_url"] = "https://{0}.digitaloceanspaces.com".format(region)
+    return kwargs
+
 #custom added code for download file is represented as dow{number}
 
 def compress_key_async(key):
@@ -54,34 +72,9 @@ class S3Operations(object):
             'S3 File Attachment',
             'S3 File Attachment',
         )
-        if (
-            self.s3_settings_doc.aws_key and
-            self.s3_settings_doc.aws_secret
-        ):
-            self.S3_CLIENT = boto3.client(
-                's3',
-                aws_access_key_id=self.s3_settings_doc.aws_key,
-                aws_secret_access_key=self.s3_settings_doc.aws_secret,
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
-            # does initialize boto3 resource libraray
-            self.S3_RESOURCE = boto3.resource(
-                's3',
-                aws_access_key_id=self.s3_settings_doc.aws_key,
-                aws_secret_access_key=self.s3_settings_doc.aws_secret,
-                region_name=self.s3_settings_doc.region_name,
-            )
-        else:
-            self.S3_CLIENT = boto3.client(
-                's3',
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
-            self.S3_RESOURCE = boto3.resource(
-                's3',
-                region_name=self.s3_settings_doc.region_name
-            )
+        connection = _s3_connection_kwargs(self.s3_settings_doc)
+        self.S3_CLIENT = boto3.client("s3", **connection)
+        self.S3_RESOURCE = boto3.resource("s3", **connection)
 
         self.BUCKET = self.s3_settings_doc.bucket_name
         self.folder_name = self.s3_settings_doc.folder_name
@@ -210,13 +203,7 @@ class S3Operations(object):
         )
 
         if self.s3_settings_doc.delete_file_from_cloud:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.s3_settings_doc.aws_key,
-                aws_secret_access_key=self.s3_settings_doc.aws_secret,
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
+            s3_client = boto3.client("s3", **_s3_connection_kwargs(self.s3_settings_doc))
 
             try:
                 s3_client.delete_object(
